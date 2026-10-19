@@ -1,0 +1,17 @@
+import {createApp} from './app.js';
+import {PublisherClient,privateText} from './publisher.js';
+import {dataDirectory,env} from './config.js';
+const dataDir=dataDirectory();
+const host=env('HOST')??process.env.HOST??'127.0.0.1';
+const port=Number(env('PORT')??process.env.PORT??4317);
+const publisherUrl=env('PUBLISHER_URL');
+const publisherTokenFile=env('PUBLISHER_TOKEN_FILE');
+if(!!publisherUrl!==!!publisherTokenFile)throw new Error('独立发布器需要同时设置 VOID0_PUBLISHER_URL 和 VOID0_PUBLISHER_TOKEN_FILE');
+const publisher=publisherUrl&&publisherTokenFile?new PublisherClient(publisherUrl,privateText(publisherTokenFile).trim()):undefined;
+const {app}=await createApp({dataDir,publicUrl:env('PUBLIC_URL'),databaseUrl:env('DATABASE_URL'),publisher});
+await app.listen({host,port});
+console.log(`void0 is running at http://${host}:${port}`);
+console.log(`Data directory: ${dataDir}`);
+console.log('首次创建管理员时，请读取数据目录中的 setup-token 安装码。');
+const shutdown=async()=>{await app.close();process.exit(0);};
+process.once('SIGTERM',shutdown);process.once('SIGINT',shutdown);

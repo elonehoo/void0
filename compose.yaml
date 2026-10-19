@@ -1,0 +1,40 @@
+name: void0
+services:
+  app:
+    build: .
+    image: void0:local
+    restart: unless-stopped
+    environment:
+      HOST: 0.0.0.0
+      PORT: 4317
+      VOID0_DATA_DIR: /data
+      VOID0_PUBLIC_URL: ${VOID0_PUBLIC_URL:-${SERVERDESK_PUBLIC_URL:-}}
+    ports:
+      - "127.0.0.1:4317:4317"
+    volumes:
+      - data:/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+  caddy:
+    image: caddy:2
+    profiles: [public]
+    restart: unless-stopped
+    environment:
+      VOID0_DOMAIN: ${VOID0_DOMAIN:-${SERVERDESK_DOMAIN:-localhost}}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      app:
+        condition: service_healthy
+volumes:
+  data:
+  caddy-data:
+  caddy-config:

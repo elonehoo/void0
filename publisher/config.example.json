@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "keyId": "publisher-v1",
+  "services": [
+    {
+      "repository": "YOUR_ORG/YOUR_REPO",
+      "branch": "main",
+      "dockerfile": "Dockerfile",
+      "context": ".",
+      "imageRepository": "registry.example.com/apps/web",
+      "service": {
+        "id": "web-service-id",
+        "name": "Web",
+        "kind": "image",
+        "serverId": "business-server-id",
+        "target": {},
+        "repository": "https://github.com/YOUR_ORG/YOUR_REPO",
+        "branch": "main",
+        "containerPort": 8080,
+        "hostPort": 8080,
+        "environment": {},
+        "volumes": [],
+        "autoDeploy": true,
+        "createdAt": "2026-10-19T00:00:00.000Z",
+        "updatedAt": "2026-10-19T00:00:00.000Z"
+      },
+      "server": {
+        "id": "business-server-id",
+        "name": "Business server",
+        "host": "server.example.com",
+        "port": 22,
+        "username": "ubuntu",
+        "group": "Default",
+        "notes": "",
+        "connectionMode": "agent",
+        "createdAt": "2026-10-19T00:00:00.000Z",
+        "updatedAt": "2026-10-19T00:00:00.000Z"
+      }
+    }
+  ]
+}

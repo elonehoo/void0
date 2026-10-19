@@ -1,0 +1,4 @@
+{$VOID0_DOMAIN} {
+  reverse_proxy app:4317
+  encode zstd gzip
+}
