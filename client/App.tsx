@@ -6,7 +6,6 @@ import {
   ArrowRight,
   Box,
   CheckCircle2,
-  ChevronDown,
   ChevronRight,
   Clock3,
   ExternalLink as ExternalIcon,
@@ -234,31 +233,6 @@ export default function App() {
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button variant="ghost" className="workspace-control">
-              <span className="workspace-icon">
-                <Box size={17} />
-              </span>
-              <span className="workspace-control-label">
-                void0<small>我的工作空间</small>
-              </span>
-              <ChevronDown size={14} />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" className="w-52">
-            <DropdownMenuLabel>我的工作空间</DropdownMenuLabel>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onClick={() => setPopup({ kind: "project" })}>
-              <Plus />
-              新建项目
-            </DropdownMenuItem>
-            <DropdownMenuItem onClick={() => setRoute({ page: "settings" })}>
-              <Settings2 />
-              设置与连接
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
         <nav className="primary-nav">
           <Button
             variant="ghost"

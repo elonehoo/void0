@@ -105,45 +105,6 @@ code {
   flex-direction: column;
   gap: 0;
 }
-.workspace-control {
-  width: 100%;
-  height: 46px;
-  justify-content: flex-start;
-  padding: 5px 8px;
-  gap: 9px;
-  margin-bottom: 20px;
-}
-.workspace-icon {
-  width: 29px;
-  height: 29px;
-  border: 1px solid #dedee1;
-  border-radius: 7px;
-  display: grid;
-  place-items: center;
-  background: white;
-  color: #303035;
-  box-shadow: 0 1px 2px #00000004;
-  flex-shrink: 0;
-}
-.workspace-control-label {
-  flex: 1;
-  min-width: 0;
-  text-align: left;
-  font-size: 13px;
-  font-weight: 600;
-  letter-spacing: -0.2px;
-}
-.workspace-control-label small {
-  display: block;
-  margin-top: 3px;
-  font-size: 12px;
-  font-weight: 400;
-  letter-spacing: 0;
-  color: var(--muted-foreground);
-}
-.workspace-control > svg:last-child {
-  color: var(--muted-foreground);
-}
 .primary-nav,
 .project-nav {
   display: flex;
@@ -1918,17 +1879,6 @@ code {
   .main-panel {
     margin-left: 57px;
   }
-  .workspace-control {
-    padding: 5px;
-    justify-content: center;
-    margin-bottom: 18px;
-  }
-  .workspace-icon {
-    height: 29px;
-    width: 29px;
-  }
-  .workspace-control-label,
-  .workspace-control > svg:last-child,
   .side-section-heading,
   .project-nav,
   .primary-nav > button > span,
