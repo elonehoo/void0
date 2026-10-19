@@ -284,18 +284,14 @@ export default function App() {
           )}
         </nav>
         <div className="sidebar-bottom">
-          <Button
-            variant="ghost"
-            className={route.page === "settings" ? "active" : ""}
-            onClick={() => setRoute({ page: "settings" })}
-          >
-            <Settings2 />
-            <span>设置与连接</span>
-          </Button>
           <Separator />
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button variant="ghost" className="account-control">
+              <Button
+                variant="ghost"
+                className="account-control"
+                aria-label="管理员菜单"
+              >
                 <span className="account-avatar">A</span>
                 <span>
                   管理员<small>void0 {snapshot.version}</small>
@@ -303,8 +299,13 @@ export default function App() {
                 <MoreHorizontal size={16} />
               </Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="start" className="w-48">
+            <DropdownMenuContent side="top" align="start" className="w-48">
               <DropdownMenuLabel>管理员</DropdownMenuLabel>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onSelect={() => setRoute({ page: "settings" })}>
+                <Settings2 />
+                设置与连接
+              </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem
                 onClick={() =>

@@ -112,8 +112,7 @@ code {
   gap: 3px;
 }
 .primary-nav > button,
-.project-nav > button,
-.sidebar-bottom > button {
+.project-nav > button {
   width: 100%;
   height: 32px;
   min-height: 32px;
@@ -127,8 +126,7 @@ code {
   font-weight: 450;
 }
 .primary-nav > button svg,
-.project-nav > button svg,
-.sidebar-bottom > button svg {
+.project-nav > button svg {
   width: 15px;
   height: 15px;
   color: var(--muted-foreground);
@@ -136,15 +134,13 @@ code {
   stroke-width: 1.7;
 }
 .primary-nav > button.active,
-.project-nav > button.active,
-.sidebar-bottom > button.active {
+.project-nav > button.active {
   color: #242428;
   background: #ececef;
   font-weight: 500;
 }
 .primary-nav > button.active svg,
-.project-nav > button.active svg,
-.sidebar-bottom > button.active svg {
+.project-nav > button.active svg {
   color: #3f3f46;
 }
 .primary-nav > button > span,
@@ -188,9 +184,6 @@ code {
 .sidebar-bottom {
   margin-top: auto;
   padding-top: 24px;
-}
-.sidebar-bottom > button {
-  margin-bottom: 13px;
 }
 .sidebar-bottom > [data-slot="separator"] {
   margin: 0 0 9px;
@@ -1883,13 +1876,11 @@ code {
   .project-nav,
   .primary-nav > button > span,
   .primary-nav > button > small,
-  .sidebar-bottom > button > span,
   .account-control > span:nth-child(2),
   .account-control > svg {
     display: none;
   }
-  .primary-nav > button,
-  .sidebar-bottom > button {
+  .primary-nav > button {
     justify-content: center;
     padding: 7px;
     gap: 0;
@@ -1898,8 +1889,7 @@ code {
   .primary-nav {
     gap: 7px;
   }
-  .primary-nav > button > svg,
-  .sidebar-bottom > button > svg {
+  .primary-nav > button > svg {
     width: 17px;
     height: 17px;
   }
@@ -2400,7 +2390,6 @@ code {
 .service-name,
 .sidebar .primary-nav > button,
 .sidebar .project-nav > button,
-.sidebar-bottom > button,
 .field > input,
 .field > textarea,
 .field select,
