@@ -2,7 +2,7 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypt
 import { isDeepStrictEqual } from 'node:util';
 import { Store } from './store.js';
 
-export type AgentOperation = 'probe' | 'bootstrap' | 'submit' | 'status' | 'kubernetes-action';
+export type AgentOperation = 'probe' | 'bootstrap' | 'submit' | 'status' | 'kubernetes-action' | 'domain';
 export interface AgentCommand { id:string; operation:AgentOperation; payload:unknown }
 export interface AgentDeploymentProtection { mode:'compatibility'|'strict';policyVersion?:number }
 export interface AgentInfo { configured:boolean; online:boolean; lastSeen?:string; hostname?:string; version?:string; pending:number; pairingPending?:boolean;deploymentProtection:AgentDeploymentProtection }
@@ -26,7 +26,7 @@ interface TokenRecord { serverId:string; generation:string }
 interface AuditRecord { id:string; operation:AgentOperation; state:CommandState; time:string }
 interface ControllerOptions { now?:()=>number; waitIntervalMs?:number }
 
-const operations = new Set<AgentOperation>(['probe','bootstrap','submit','status','kubernetes-action']);
+const operations = new Set<AgentOperation>(['probe','bootstrap','submit','status','kubernetes-action','domain']);
 const pendingStates = new Set<CommandState>(['queued','claimed','acknowledged']);
 const onlineWindowMs=45_000;
 const pairingWindowMs=15*60_000;

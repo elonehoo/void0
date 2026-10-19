@@ -1,4 +1,5 @@
 import PublisherServiceEditor,{type ServiceEditorProps} from './PublisherServiceEditor';
+import IntegrationConnection from './IntegrationConnection';
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -69,7 +70,7 @@ export function ProjectEditor({
   );
   return (
     <Modal
-      title={deleting ? "删除项目分组" : project ? "项目设置" : "新建项目"}
+      title={deleting ? "删除项目" : project ? "项目设置" : "新建项目"}
       subtitle={
         deleting
           ? project?.name
@@ -102,10 +103,8 @@ export function ProjectEditor({
           {deleting ? (
             <>
               <Notice>
-                只删除「{project?.name}
-                」的分组信息。服务器、服务、数据与部署记录都会保留。
+                确认删除空项目「{project?.name}」？服务器与部署记录仍然保留。
               </Notice>
-              <p className="body-copy">这些服务之后仍可被加入其他项目。</p>
             </>
           ) : (
             <>
@@ -142,6 +141,7 @@ export function ProjectEditor({
                   />
                 </label>
               </div>
+              {Boolean(project?.serviceIds.length) && <p className="field-hint">服务必须属于一个项目。如需移出，请在目标项目中选择这些服务；移空后才能删除此项目。</p>}
               <div className="resource-picker">
                 {visible.length ? (
                   visible.map((service) => {
@@ -155,7 +155,9 @@ export function ProjectEditor({
                         <CheckRow
                           title={service.name}
                           description={
-                            owner
+                            project?.serviceIds.includes(service.id)
+                              ? "已在此项目中，可从目标项目设置移走"
+                              : owner
                               ? `当前属于 ${owner.name}，选中后移入此项目`
                               : service.kind === "vercel"
                                 ? "Vercel"
@@ -164,6 +166,7 @@ export function ProjectEditor({
                                   )?.name ?? "未分组")
                           }
                           checked={selected.includes(service.id)}
+                          disabled={project?.serviceIds.includes(service.id)}
                           onChange={(checked) =>
                             setSelected(
                               checked
@@ -199,10 +202,12 @@ export function ProjectEditor({
             <Button
               type="button"
               variant="ghost" className="button danger subtle text-destructive"
+              disabled={Boolean(project.serviceIds.length)}
+              title={project.serviceIds.length ? "请先移动或删除项目中的服务" : undefined}
               onClick={() => setDeleting(true)}
             >
               <Trash2 size={14} />
-              删除分组
+              删除项目
             </Button>
           ) : (
             <span />
@@ -233,7 +238,7 @@ export function ProjectEditor({
                   }
                 }}
               >
-                <BusyLabel busy={busy}>确认删除分组</BusyLabel>
+                <BusyLabel busy={busy}>确认删除项目</BusyLabel>
               </Button>
             ) : (
               <Button
@@ -582,13 +587,8 @@ function ControllerServiceEditor({
   snapshot,
   onClose,
   onSaved,
-}: {
-  service?: Service;
-  project: Project;
-  snapshot: WorkspaceSnapshot;
-  onClose: () => void;
-  onSaved: () => Promise<void>;
-}) {
+  onConnectionsChanged,
+}: ServiceEditorProps) {
   const existing = Boolean(service);
   const compose = service?.kind === "compose";
   const [kind, setKind] = useState<"source" | "image">(
@@ -626,6 +626,7 @@ function ControllerServiceEditor({
   const [repositoryError, setRepositoryError] = useState("");
   const [loadingRepos, setLoadingRepos] = useState(false);
   const [loadingBranches, setLoadingBranches] = useState(false);
+  const [connecting, setConnecting] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   useEffect(() => {
@@ -806,7 +807,8 @@ function ControllerServiceEditor({
               </div>
               {!snapshot.integrations.github.connected && (
                 <Notice>
-                  需要在「设置与连接」中连接 GitHub，才能选择仓库并获取代码。
+                  <span>连接 GitHub 后即可选择仓库和分支。</span>
+                  <Button type="button" variant="outline" size="sm" onClick={()=>setConnecting(true)}>连接 GitHub</Button>
                 </Notice>
               )}
               <div className="form-grid">
@@ -1032,6 +1034,7 @@ function ControllerServiceEditor({
           </div>
         </div>
       </form>
+      {connecting&&<IntegrationConnection provider="github" onClose={()=>setConnecting(false)} onConnected={async()=>{await onConnectionsChanged?.();setConnecting(false);}}/>}
     </Modal>
   );
 }
@@ -1041,11 +1044,13 @@ export function VercelImport({
   snapshot,
   onClose,
   onSaved,
+  onConnectionsChanged,
 }: {
   project: Project;
   snapshot: WorkspaceSnapshot;
   onClose: () => void;
   onSaved: () => Promise<void>;
+  onConnectionsChanged?: () => Promise<unknown>;
 }) {
   const [projects, setProjects] = useState<
     Array<{
@@ -1063,9 +1068,11 @@ export function VercelImport({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
+  const [connecting,setConnecting]=useState(false);
   useEffect(() => {
     if (!snapshot.integrations.vercel.connected) return;
     let live = true;
+    setLoading(true);
     api<{ projects: typeof projects }>("/vercel/projects")
       .then((value) => {
         if (live) setProjects(value.projects);
@@ -1088,8 +1095,8 @@ export function VercelImport({
     >
       <div className="modal-body">
         {!snapshot.integrations.vercel.connected ? (
-          <Empty icon={GitBranch} title="尚未连接 Vercel">
-            请在「设置与连接」中添加 Vercel Token，然后返回导入。
+          <Empty icon={GitBranch} title="尚未连接 Vercel" action={<Button type="button" size="sm" onClick={()=>setConnecting(true)}>连接 Vercel</Button>}>
+            连接后即可选择要加入此项目的 Vercel 服务。
           </Empty>
         ) : loading ? (
           <Loading label="正在获取 Vercel 项目…" />
@@ -1183,6 +1190,7 @@ export function VercelImport({
           </Button>
         </div>
       </div>
+      {connecting&&<IntegrationConnection provider="vercel" onClose={()=>setConnecting(false)} onConnected={async()=>{await onConnectionsChanged?.();setConnecting(false);}}/>}
     </Modal>
   );
 }

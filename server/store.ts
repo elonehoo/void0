@@ -79,7 +79,10 @@ export class Store {
     });
   }
   async removeProject(value: string): Promise<void> {
-    return this.transaction(async()=>{ await this.database.run(`DELETE FROM ${this.database.table('projects')} WHERE id=?`,[value]);
+    return this.transaction(async()=>{
+      const project=await this.getProject(value);
+      if(project?.serviceIds.length)throw new Error('项目仍包含服务，请先将服务移入其他项目或删除服务');
+      await this.database.run(`DELETE FROM ${this.database.table('projects')} WHERE id=?`,[value]);
     });
   }
 

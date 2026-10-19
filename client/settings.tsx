@@ -1,25 +1,20 @@
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
-import { NativeSelect } from "@/components/ui/native-select";
 import { useState } from "react";
 import {
   CheckCircle2,
   ChevronRight,
-  ExternalLink as ExternalIcon,
   Github,
   Globe2,
-  KeyRound,
-  Link2,
   ShieldCheck,
   Unplug,
 } from "lucide-react";
 import type { WorkspaceSnapshot } from "../shared/types";
 import { errorText, send } from "./api";
+import IntegrationConnection from "./IntegrationConnection";
 import {
   BusyLabel,
   ErrorNotice,
-  ExternalLink,
   Field,
   Modal,
   Notice,
@@ -34,7 +29,8 @@ export function SettingsPage({
 }) {
   const [connection, setConnection] = useState<"github" | "vercel">();
   const [disconnect, setDisconnect] = useState<"github" | "vercel">();
-  const [token, setToken] = useState("");
+  const [checking, setChecking] = useState<"github" | "vercel">();
+  const [connectionNotice, setConnectionNotice] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [publicUrl, setPublicUrl] = useState(
@@ -65,99 +61,46 @@ export function SettingsPage({
             <h2>平台连接</h2>
             <p>一次连接，供工作空间中的所有项目使用。</p>
           </div>
-          <div className="integration-card">
-            <span className="integration-logo github">
-              <Github size={27} />
-            </span>
-            <div className="integration-info">
-              <h3>
-                GitHub{" "}
-                {integration.github.connected && (
-                  <span className="badge badge-green">
-                    <span className="status-dot" />
-                    已连接
-                  </span>
-                )}
-              </h3>
-              <p>
-                {integration.github.connected
-                  ? `已连接 ${integration.github.login ?? "GitHub 账号"}，可以选择仓库和分支。`
-                  : snapshot.platform?.publisherConfigured ? "GitHub 由独立发布器连接，管理后台不保存源码访问凭据。" : "选择仓库，从代码构建 Docker 镜像并自动部署。"}
-              </p>
-              {integration.github.error && (
-                <p className="inline-error">{integration.github.error}</p>
-              )}
-            </div>
-            <div className="integration-actions">
-              {integration.github.connected && (
-                <Button
-                  variant="ghost" size="icon" className="icon-button"
-                  aria-label="断开 GitHub"
-                  onClick={() => setDisconnect("github")}
-                >
-                  <Unplug size={16} />
+          {(["github", "vercel"] as const).map(provider => {
+            const details = integration[provider];
+            const name = provider === "github" ? "GitHub" : "Vercel";
+            const publisherManaged = provider === "github" && snapshot.platform?.publisherConfigured;
+            return <div className="integration-card" key={provider}>
+              <span className={`integration-logo ${provider === "github" ? "github" : ""}`}>
+                {provider === "github" ? <Github size={27} /> : <span className="vercel-triangle large" />}
+              </span>
+              <div className="integration-info">
+                <h3>{name}{details.connected && <span className={`badge ${details.error ? "badge-red" : "badge-green"}`}><span className="status-dot" />{details.error ? "连接异常" : "已连接"}</span>}</h3>
+                <p>{publisherManaged
+                  ? "GitHub 由独立发布器连接，管理后台不保存源码访问凭据。"
+                  : details.connected
+                    ? `账号：${details.login ?? name}。${provider === "github" ? "可以选择仓库、分支并发布代码。" : "可以导入项目、查看部署状态并绑定域名。"}`
+                    : provider === "github" ? "连接 GitHub，选择仓库并部署 Docker 服务。" : "连接 Vercel，将托管服务放进你的项目。"}</p>
+                {details.checkedAt && <p className="muted small">上次检查：{new Date(details.checkedAt).toLocaleString("zh-CN")}</p>}
+                {details.error && <p className="inline-error" role="alert">{details.error}</p>}
+              </div>
+              <div className="integration-actions">
+                {details.connected && <>
+                  <Button variant="outline" className="button" disabled={!!checking || busy || publisherManaged} onClick={async () => {
+                    setChecking(provider);
+                    setError("");
+                    setConnectionNotice("");
+                    try {
+                      const result = await send<{ connected: boolean }>(`/integrations/${provider}/check`, "POST");
+                      await reload();
+                      if (result.connected) setConnectionNotice(`${name} 连接有效。`);
+                    } catch (cause) { setError(errorText(cause)); }
+                    finally { setChecking(undefined); }
+                  }}><BusyLabel busy={checking === provider}>检查连接</BusyLabel></Button>
+                  <Button variant="ghost" size="icon" className="icon-button" aria-label={`断开 ${name}`} disabled={!!checking || busy} onClick={() => { setDisconnect(provider); setError(""); setConnectionNotice(""); }}><Unplug size={16} /></Button>
+                </>}
+                <Button variant="outline" className="button" disabled={publisherManaged || !!checking || busy} onClick={() => { setConnection(provider); setError(""); setConnectionNotice(""); }}>
+                  {publisherManaged ? "由发布器连接" : details.connected ? "更新凭据" : `连接 ${name}`}<ChevronRight size={14} />
                 </Button>
-              )}
-              <Button
-                variant="outline" className="button"
-                disabled={snapshot.platform?.publisherConfigured}
-                onClick={() => {
-                  setConnection("github");
-                  setToken("");
-                  setError("");
-                }}
-              >
-                {snapshot.platform?.publisherConfigured ? "由发布器连接" : integration.github.connected ? "更新凭据" : "连接 GitHub"}
-                <ChevronRight size={14} />
-              </Button>
-            </div>
-          </div>
-          <div className="integration-card">
-            <span className="integration-logo">
-              <span className="vercel-triangle large" />
-            </span>
-            <div className="integration-info">
-              <h3>
-                Vercel{" "}
-                {integration.vercel.connected && (
-                  <span className="badge badge-green">
-                    <span className="status-dot" />
-                    已连接
-                  </span>
-                )}
-              </h3>
-              <p>
-                {integration.vercel.connected
-                  ? "导入项目与运行状态，自动发布继续由 Vercel 管理。"
-                  : "将 Vercel 服务加入你的项目，统一查看运行状态。"}
-              </p>
-              {integration.vercel.error && (
-                <p className="inline-error">{integration.vercel.error}</p>
-              )}
-            </div>
-            <div className="integration-actions">
-              {integration.vercel.connected && (
-                <Button
-                  variant="ghost" size="icon" className="icon-button"
-                  aria-label="断开 Vercel"
-                  onClick={() => setDisconnect("vercel")}
-                >
-                  <Unplug size={16} />
-                </Button>
-              )}
-              <Button
-                variant="outline" className="button"
-                onClick={() => {
-                  setConnection("vercel");
-                  setToken("");
-                  setError("");
-                }}
-              >
-                {integration.vercel.connected ? "更新凭据" : "连接 Vercel"}
-                <ChevronRight size={14} />
-              </Button>
-            </div>
-          </div>
+              </div>
+            </div>;
+          })}
+          {connectionNotice && <p className="saved-label" role="status"><CheckCircle2 size={14} />{connectionNotice}</p>}
         </section>
         <section className="settings-section">
           <div className="settings-section-heading">
@@ -237,97 +180,7 @@ export function SettingsPage({
         </section>
         <ErrorNotice message={!connection && !disconnect ? error : undefined} />
       </div>
-      {connection && (
-        <Modal
-          title={`连接 ${connection === "github" ? "GitHub" : "Vercel"}`}
-          subtitle="保存后不会再次显示 Token。"
-          onClose={() => {
-            setConnection(undefined);
-            setToken("");
-            setError("");
-          }}
-        >
-          <form
-            onSubmit={async (e) => {
-              e.preventDefault();
-              setBusy(true);
-              setError("");
-              try {
-                await send(`/integrations/${connection}`, "POST", { token });
-                setToken("");
-                await reload();
-                setConnection(undefined);
-              } catch (e) {
-                setError(errorText(e));
-              } finally {
-                setBusy(false);
-              }
-            }}
-          >
-            <div className="modal-body">
-              {connection === "github" ? (
-                <>
-                  <p className="body-copy">
-                    添加可访问目标仓库的 GitHub Token，后台用它读取代码与分支。
-                  </p>
-                  <Notice>
-                    使用 Fine-grained Token 时，为所需仓库授予{" "}
-                    <strong>Contents: Read-only</strong> 和{" "}
-                    <strong>Metadata: Read-only</strong> 权限即可。
-                  </Notice>
-                  <ExternalLink href="https://github.com/settings/personal-access-tokens/new">
-                    在 GitHub 创建 Token
-                  </ExternalLink>
-                </>
-              ) : (
-                <>
-                  <p className="body-copy">
-                    添加拥有目标项目访问权限的 Vercel
-                    Token，用于读取项目、域名与部署状态。
-                  </p>
-                  <ExternalLink href="https://vercel.com/account/settings/tokens">
-                    在 Vercel 创建 Token
-                  </ExternalLink>
-                </>
-              )}
-              <Field
-                label={`${connection === "github" ? "GitHub" : "Vercel"} Token`}
-                required
-              >
-                <Input
-                  type="password"
-                  required
-                  value={token}
-                  onChange={(e) => setToken(e.target.value)}
-                  autoComplete="new-password"
-                  spellCheck={false}
-                  autoFocus
-                  placeholder="粘贴 Token"
-                />
-              </Field>
-              <ErrorNotice message={error} />
-            </div>
-            <div className="modal-footer">
-              <Button
-                type="button"
-                variant="outline" className="button"
-                onClick={() => {
-                  setConnection(undefined);
-                  setToken("");
-                }}
-              >
-                取消
-              </Button>
-              <Button
-                variant="default" className="button primary"
-                disabled={busy || !token.trim()}
-              >
-                <BusyLabel busy={busy}>保存并连接</BusyLabel>
-              </Button>
-            </div>
-          </form>
-        </Modal>
-      )}
+      {connection && <IntegrationConnection provider={connection} onClose={() => setConnection(undefined)} onConnected={reload} />}
       {disconnect && (
         <Modal
           title={`断开 ${disconnect === "github" ? "GitHub" : "Vercel"} 连接`}

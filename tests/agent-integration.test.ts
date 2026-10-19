@@ -118,7 +118,7 @@ test('public Agent bundle is verifiable while pairing and commands enforce accou
     assert.deepEqual([...files.keys()].sort(),['daemon.py','install.sh','programs.json','serverdesk-agent.service']);
     assert.deepEqual(files.get('daemon.py'),readFileSync(resolve('agent/daemon.py')));
     assert.deepEqual(files.get('install.sh'),readFileSync(resolve('agent/install.sh')));
-    assert.deepEqual(Object.keys(JSON.parse(files.get('programs.json')!.toString('utf8'))).sort(),['bootstrap','kubernetes-action','probe','status','submit']);
+    assert.deepEqual(Object.keys(JSON.parse(files.get('programs.json')!.toString('utf8'))).sort(),['bootstrap','domain','kubernetes-action','probe','status','submit']);
     const pairingPath=`/api/servers/${server.id}/agent/pairing`;
     assert.equal((await f.request(pairingPath,{})).status,401,'pairing requires the administrator session');
     const setup=await f.request('/api/setup',{setupToken:installCode,password});assert.equal(setup.status,200);

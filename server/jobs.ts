@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { BootstrapOptions, DeployPlan, Job, KubernetesAction, RemoteTransport, ServerStatus, Service, ServiceStatus, SSHCredential } from '../shared/types.js';
 import type { Store } from './store.js';
 import { GitHub, repositoryName, Vercel } from './integrations.js';
+import { getProviderToken,type ProviderCredential } from './provider-oauth.js';
 import type {PublisherClient} from './publisher.js';
 import {managedComposeTarget} from '../shared/service-target.js';
 
@@ -149,7 +150,7 @@ export class JobManager {
       service.environment=(await this.store.getServiceEnvironment(service.id));
       let repository:DeployPlan['repository'];
       if(service.repository) {
-        const token=(await this.store.vault.get<{token:string}>('github'))?.token; if(!token) throw new Error('GitHub 尚未连接。');
+        const token=await getProviderToken(this.store,'github'); if(!token) throw new Error('GitHub 尚未连接。');
         const gh=new GitHub(token); const name=repositoryName(service.repository);
         const latest=await gh.commit(name,service.branch??'main');
         if(this.stopped)return;
@@ -204,9 +205,9 @@ export class JobManager {
   async refreshService(id:string):Promise<ServiceStatus> {
     const service=(await this.store.getService(id)); if(!service) throw new Error('服务不存在。');
     if(service.kind==='vercel') {
-      const token=(await this.store.vault.get<{token:string}>('vercel'))?.token;
+      const credential=await this.store.vault.get<ProviderCredential>('vercel');const token=credential?.token;
       let status:ServiceStatus;
-      try { if(!token) throw new Error('Vercel 尚未连接。'); status=await new Vercel(token).status(service); }
+      try { if(!token) throw new Error('Vercel 尚未连接。'); status=await new Vercel(token,fetch,credential?.authorization==='vercel-integration'?(credential.teamId??credential.userId):credential?.teamId).status(service); }
       catch(error) { status={serviceId:id,state:'error',ready:false,message:safeMessage(error),checkedAt:new Date().toISOString()}; }
       if(!this.stopped)(await this.store.setSetting(`status:service:${id}`,status)); return status;
     }
@@ -226,7 +227,7 @@ export class JobManager {
     return {serviceId:service.id,state:ready?'running':matches.length?'stopped':'unknown',ready,message:matches.length===1?matches[0].state:matches.length?`${matches.filter(r=>r.ready).length}/${matches.length} 已就绪`:'未找到对应运行实例',checkedAt:status.checkedAt,image:matches.length===1?matches[0].image:undefined};
   }
   async checkSources() {
-    const token=(await this.store.vault.get<{token:string}>('github'))?.token; if(!token&&!this.publisher) return;
+    const token=await getProviderToken(this.store,'github'); if(!token&&!this.publisher) return;
     const gh=new GitHub(token??'');
     for(const service of (await this.store.allServices()).filter(s=>s.autoDeploy && (s.repository || (this.publisher && s.serverId && s.kind==='image')))) {
       try {

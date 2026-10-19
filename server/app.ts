@@ -15,6 +15,9 @@ import {agentBundle,agentInstaller,agentManifest} from './agent-bundle.js';
 import {BOOTSTRAP_SCRIPT,DEFAULT_K3S_VERSION,k3sBootstrapScript} from './remote-scripts.js';
 import {JobManager,activeJob,safeMessage} from './jobs.js';
 import {GitHub,Vercel,repositoryName,validWebhook} from './integrations.js';
+import {registerConnectionRoutes,type ConnectionStatus} from './connection-routes.js';
+import {registerProviderOAuth,getProviderToken,type ProviderCredential} from './provider-oauth.js';
+import {registerDomainRoutes,assertDomainTargetUnchanged,assertServiceDomainsRemoved} from './domains.js';
 import type {Project,Server,Service,Job,RemoteTransport,ServerStatus,SSHCredential} from '../shared/types.js';
 
 declare module 'fastify' { interface FastifyRequest { rawBody:Buffer; sessionId?:string; session?:Session; agentServerId?:string } }
@@ -28,7 +31,6 @@ const branchSchema=z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._/-]
 const serverSchema=z.object({name:nameSchema,host:z.string().min(1).max(255).regex(/^[A-Za-z0-9[\]:_.-]+$/).refine(v=>!v.startsWith('-')),port:portSchema.default(22),username:z.string().min(1).max(64).regex(/^[A-Za-z_][A-Za-z0-9_.-]*$/).default('ubuntu'),group:z.string().max(80).default('默认'),notes:z.string().max(2000).default(''),connectionMode:z.enum(['ssh','agent']).optional()});
 const projectSchema=z.object({name:nameSchema,description:z.string().max(1000).default(''),serviceIds:z.array(idSchema).max(1000).optional()});
 const serviceSchema=z.object({projectId:idSchema.optional(),name:nameSchema,kind:z.enum(['source','image','compose','kubernetes','container','vercel']).optional(),serverId:idSchema.optional(),repository:z.string().max(256).optional(),branch:branchSchema.optional(),dockerfile:relativePath.optional(),context:z.union([z.literal('.'),relativePath]).optional(),image:z.string().max(512).regex(/^[A-Za-z0-9][A-Za-z0-9/_.:@-]*$/).optional(),containerPort:portSchema.optional(),hostPort:portSchema.optional(),environment:z.record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/),z.string().max(16384)).optional(),volumes:z.array(z.object({name:z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$/),mountPath:z.string().max(512).regex(/^\/(?:[A-Za-z0-9_.-]+\/)*[A-Za-z0-9_.-]+\/?$/).refine(p=>!p.split('/').some(s=>s==='.'||s==='..'))})).max(20).optional(),autoDeploy:z.boolean().optional()});
-const secretSchema=z.object({token:z.string().trim().min(8).max(4096)});
 
 export async function createApp(options:AppOptions) {
   const app=Fastify({logger:false,bodyLimit:1_048_576,trustProxy:false});
@@ -94,7 +96,7 @@ export async function createApp(options:AppOptions) {
         const session=(await store.vault.get<Session>(`session:${sid}`));
         if(session && session.expires>Date.now()) {req.session=session;req.sessionId=sid;}
       }
-      const open=['/api/session','/api/login','/api/setup'].includes(url);
+      const open=['/api/session','/api/login','/api/setup'].includes(url)||(req.method==='GET'&&/^\/api\/integrations\/(?:github|vercel)\/callback$/.test(url));
       if(!open && !req.session) return reply.code(401).send({error:'请登录管理平台。'});
       if(!open && !['GET','HEAD'].includes(req.method) && !secureEqual(req.headers['x-csrf-token'],req.session?.csrf)) return reply.code(403).send({error:'登录状态已变化，请刷新页面后重试。'});
     }
@@ -180,10 +182,15 @@ export async function createApp(options:AppOptions) {
   const integrations=async ()=>{
     const services=await store.allServices();
     const webhooks=await Promise.all(services.map(service=>store.vault.has(`webhook:${service.id}`)));
-    return {github:{connected:await store.vault.has('github'),login:await store.getSetting<string>('githubLogin')},vercel:{connected:await store.vault.has('vercel')},webhookConfigured:webhooks.some(Boolean),publicUrl:await store.getSetting<string>('publicUrl')};
+    return {github:{connected:await store.vault.has('github'),login:await store.getSetting<string>('githubLogin'),...await store.getSetting<ConnectionStatus>('githubConnectionStatus')},vercel:{connected:await store.vault.has('vercel'),login:await store.getSetting<string>('vercelLogin'),...await store.getSetting<ConnectionStatus>('vercelConnectionStatus')},webhookConfigured:webhooks.some(Boolean),publicUrl:await store.getSetting<string>('publicUrl')};
   };
   app.post('/api/projects',async req=>{const body=projectSchema.parse(req.body),now=new Date().toISOString();const project:Project={...body,id:randomUUID(),serviceIds:[],createdAt:now,updatedAt:now};(await store.transaction(async ()=>{(await store.saveProject(project));if(body.serviceIds)(await store.moveServices(body.serviceIds,project.id));}));return (await store.getProject(project.id));});
-  app.put('/api/projects/:id',async req=>{const id=paramId(req),current=(await store.getProject(id));if(!current)throw new Error('项目不存在。');const body=projectSchema.parse(req.body);const value={...current,...body,serviceIds:body.serviceIds??current.serviceIds,updatedAt:new Date().toISOString()};(await store.transaction(async ()=>{(await store.saveProject({...value,serviceIds:current.serviceIds.filter(s=>value.serviceIds.includes(s))}));(await store.moveServices(value.serviceIds,id));(await store.saveProject(value));}));return (await store.getProject(id));});
+  app.put('/api/projects/:id',async req=>{const id=paramId(req),body=projectSchema.parse(req.body);await store.transaction(async()=>{
+    const current=await store.getProject(id);if(!current)throw new Error('项目不存在。');
+    const value={...current,...body,serviceIds:body.serviceIds??current.serviceIds,updatedAt:new Date().toISOString()};
+    if(current.serviceIds.some(serviceId=>!value.serviceIds.includes(serviceId)))throw new Error('服务必须属于项目，请在目标项目中选择服务进行移动，或删除服务。');
+    await store.moveServices(value.serviceIds,id);await store.saveProject(value);
+  });return await store.getProject(id);});
   app.delete('/api/projects/:id',async req=>{(await store.removeProject(paramId(req)));return {ok:true};});
   app.post('/api/servers',async req=>{const body=serverSchema.parse(req.body),now=new Date().toISOString();return (await store.saveServer({...body,id:randomUUID(),createdAt:now,updatedAt:now}));});
   app.put('/api/servers/:id',async req=>{
@@ -191,6 +198,7 @@ export async function createApp(options:AppOptions) {
     const body=serverSchema.parse(req.body),identityChanged=body.host!==current.host || body.port!==current.port || body.username!==current.username;
     if(identityChanged && (await store.allJobs()).some(j=>j.serverId===id&&activeJob(j)))throw new Error('此服务器仍有任务待确认，请确认后再修改连接地址。');
     if(identityChanged && (await store.allServices()).some(s=>s.serverId===id&&s.autoDeploy))throw new Error('请先暂停此服务器上服务的自动发布，再修改连接地址。');
+    if(identityChanged)for(const service of (await store.allServices()).filter(service=>service.serverId===id))await assertServiceDomainsRemoved(store,service.id);
     if(identityChanged){(await store.vault.delete(`ssh:${id}`));(await store.setSetting(`status:server:${id}`,null));}
     return (await store.saveServer({...current,...body,fingerprint:identityChanged?undefined:current.fingerprint,updatedAt:new Date().toISOString()}));
   });
@@ -269,6 +277,7 @@ export async function createApp(options:AppOptions) {
   app.get('/api/services/:id',async req=>{const value=(await store.getService(paramId(req)));if(!value)throw new Error('服务不存在。');return value;});
   const saveService=async(req:FastifyRequest,existing?:Service)=>{
     const body=serviceSchema.parse(req.body),now=new Date().toISOString();
+    if(!existing&&!body.projectId)throw new Error('请先创建或选择项目，再添加服务。');
     if(options.publisher&&body.environment&&Object.keys(body.environment).length)throw new Error('独立发布器模式不在管理后台保存应用环境变量，请将变量保存在业务服务器本地文件。');
     if(existing && (await store.allJobs()).some(j=>j.serviceId===existing.id&&activeJob(j)))throw new Error('此服务仍有任务正在运行或结果待确认，请确认后再编辑。');
     if(existing && body.serverId && body.serverId!==existing.serverId)throw new Error('已有服务的服务器不能在编辑配置时更换，请单独迁移服务。');
@@ -278,6 +287,7 @@ export async function createApp(options:AppOptions) {
     if(!kind || (!existing && !['source','image'].includes(kind)))throw new Error('新增服务请选择源码仓库或 Docker 镜像。');
     const value:Service={...(existing??{id,kind,target:{composeProject:'sd-'+id.toLowerCase().replaceAll('-',''),composeService:'app'},createdAt:now,autoDeploy:false}),...body,kind,updatedAt:now};
     delete (value as unknown as Record<string,unknown>).projectId;
+    if(existing)await assertDomainTargetUnchanged(store,existing,value);
     if(value.repository) value.repository='https://github.com/'+repositoryName(value.repository);
     if(kind!=='vercel' && (!value.serverId || !(await store.getServer(value.serverId))))throw new Error('请选择已添加的服务器。');
     if(kind==='source' && !value.repository)throw new Error('请选择 GitHub 源码仓库。');
@@ -287,31 +297,42 @@ export async function createApp(options:AppOptions) {
     if(value.autoDeploy && !options.publisher && !(await store.vault.has('github')))throw new Error('请先连接 GitHub。');
     if(value.autoDeploy && (!value.serverId || !(await jobs.canControl(value.serverId))))throw new Error('请先接入在线的 void0 OS，或核验 SSH 指纹并保存登录凭据。');
     if(existing?.kind==='compose' && (body.environment!==undefined||body.volumes!==undefined||body.hostPort!==undefined||body.containerPort!==undefined))throw new Error('已关联的 Compose 服务沿用服务器上的环境、端口和数据卷，本次只配置源码发布。');
-    if(body.projectId&&!(await store.getProject(body.projectId)))throw new Error('目标项目不存在。');
-    (await store.transaction(async ()=>{(await store.saveService(value));if(body.projectId)(await store.moveServices([id],body.projectId));}));
+    await store.transaction(async()=>{
+      if(body.projectId&&!(await store.getProject(body.projectId)))throw new Error('目标项目不存在。');
+      const owner=existing?(await store.allProjects()).find(project=>project.serviceIds.includes(id)):undefined;
+      if(owner&&body.projectId&&owner.id!==body.projectId)throw new Error('请通过目标项目的设置移动服务。');
+      await store.saveService(value);if(body.projectId)await store.moveServices([id],body.projectId);
+    });
     return (await store.getService(id));
   };
   app.post('/api/services',async req=>saveService(req));
   app.put('/api/services/:id',async req=>{const existing=(await store.getService(paramId(req)));if(!existing)throw new Error('服务不存在。');return saveService(req,existing);});
-  app.delete('/api/services/:id',async req=>{(await store.removeService(paramId(req)));return {ok:true};});
+  app.delete('/api/services/:id',async req=>{await assertServiceDomainsRemoved(store,paramId(req));(await store.removeService(paramId(req)));return {ok:true};});
   app.post('/api/services/:id/deploy',async req=>(await jobs.enqueue(paramId(req))));
   app.post('/api/services/:id/refresh',async req=>jobs.refreshService(paramId(req)));
   app.get('/api/jobs/:id',async req=>{return jobs.refreshJob(paramId(req));});
   app.post('/api/jobs/:id/acknowledge',async req=>{const id=paramId(req),job=(await store.getJob(id));if(!job||job.state!=='unknown')throw new Error('只有结果待确认的任务可以结束跟踪。');return (await store.updateJob(id,{state:'cancelled',stage:'已结束跟踪，远端结果未确认',updatedAt:new Date().toISOString(),finishedAt:new Date().toISOString()}));});
-  app.post('/api/integrations/github',async req=>{if(options.publisher)throw new Error('独立发布器模式由发布器连接 GitHub，管理后台不保存 GitHub Token。请手动填写仓库地址。');const {token}=secretSchema.parse(req.body);const user=await new GitHub(token).user();(await store.vault.set('github',{token}));(await store.setSetting('githubLogin',user.login));return {connected:true,login:user.login};});
-  app.delete('/api/integrations/github',async()=>{if((await store.allServices()).some(s=>s.autoDeploy))throw new Error('请先暂停所有源码服务的自动发布，再断开 GitHub。');(await store.vault.delete('github'));(await store.setSetting('githubLogin',null));return {ok:true};});
-  const github=async ()=>{const value=(await store.vault.get<{token:string}>('github'));if(!value)throw new Error('请先连接 GitHub。');return new GitHub(value.token);};
+  const github=async ()=>{const token=await getProviderToken(store,'github');if(!token)throw new Error('请先连接 GitHub。');const value=await store.vault.get<ProviderCredential>('github');return new GitHub(token,fetch,value?.authorization==='github-app'?'github-app':undefined);};
   app.get('/api/github/repositories',async()=>({repositories:await (await github()).repositories()}));
   app.get('/api/github/branches',async req=>{const q=z.object({repository:z.string().max(256)}).parse(req.query);return {branches:await (await github()).branches(q.repository)};});
-  app.post('/api/integrations/vercel',async req=>{const {token}=secretSchema.parse(req.body);await new Vercel(token).api('/v2/user');(await store.vault.set('vercel',{token}));return {connected:true};});
-  app.delete('/api/integrations/vercel',async()=>{(await store.vault.delete('vercel'));for(const service of (await store.allServices()).filter(s=>s.kind==='vercel'))(await store.setSetting(`status:service:${service.id}`,null));return {ok:true};});
-  let vercelCatalog:Array<{id:string;name:string;accountId?:string;scopeSlug?:string;framework?:string}>=[];
-  app.get('/api/vercel/projects',async()=>{const token=(await store.vault.get<{token:string}>('vercel'))?.token;if(!token)throw new Error('请先连接 Vercel。');vercelCatalog=await new Vercel(token).projects();return {projects:vercelCatalog};});
+  app.get('/api/vercel/projects',async()=>{const value=await store.vault.get<ProviderCredential>('vercel');if(!value)throw new Error('请先连接 Vercel。');return {projects:await new Vercel(value.token,fetch,value.authorization==='vercel-integration'?(value.teamId??value.userId):value.teamId).projects()};});
   app.post('/api/vercel/import',async req=>{
-    const body=z.object({projectId:idSchema,projectIds:z.array(z.string().regex(/^[A-Za-z0-9_-]+$/)).min(1).max(500)}).parse(req.body);
+    const body=z.object({projectId:idSchema,projectIds:z.array(z.string().regex(/^[A-Za-z0-9_-]+$/)).min(1).max(500).refine(ids=>new Set(ids).size===ids.length)}).parse(req.body);
     if(!(await store.getProject(body.projectId)))throw new Error('目标项目不存在。');
-    const selected=body.projectIds.map(id=>{const value=vercelCatalog.find(p=>p.id===id);if(!value)throw new Error('请重新读取 Vercel 项目列表。');return value;});
-    const now=new Date().toISOString();(await store.transaction(async ()=>{for(const p of selected){const existing=(await store.allServices()).find(s=>s.kind==='vercel'&&s.target.vercelProjectId===p.id);const id=existing?.id??randomUUID();(await store.saveService(existing??{id,name:p.name,kind:'vercel',target:{vercelProjectId:p.id,vercelScopeId:p.accountId,vercelScopeSlug:p.scopeSlug},autoDeploy:false,createdAt:now,updatedAt:now}));(await store.moveServices([id],body.projectId));}}));return {ok:true,count:selected.length};
+    const credential=await store.vault.get<ProviderCredential>('vercel');const token=credential?.token;if(!token)throw new Error('请先连接 Vercel。');
+    const catalog=await new Vercel(token,fetch,credential?.authorization==='vercel-integration'?(credential.teamId??credential.userId):credential?.teamId).projects();
+    const selected=body.projectIds.map(id=>{const value=catalog.find(p=>p.id===id);if(!value)throw new Error('所选项目已无法通过当前 Vercel 连接访问，请重新读取项目列表。');return value;});
+    const now=new Date().toISOString();await store.transaction(async()=>{
+      if(!await store.getProject(body.projectId))throw new Error('目标项目不存在。');
+      if((await store.vault.get<{token:string}>('vercel'))?.token!==token)throw new Error('Vercel 连接已变更，请重新读取项目列表。');
+      for(const p of selected){
+        const existing=(await store.allServices()).find(s=>s.kind==='vercel'&&s.target.vercelProjectId===p.id);
+        const owner=existing?(await store.allProjects()).find(project=>project.serviceIds.includes(existing.id)):undefined;
+        if(owner&&owner.id!==body.projectId)throw new Error('所选 Vercel 服务已属于其他项目，请通过目标项目的设置移动服务。');
+        const id=existing?.id??randomUUID();
+        await store.saveService(existing??{id,name:p.name,kind:'vercel',target:{vercelProjectId:p.id,vercelScopeId:p.accountId,vercelScopeSlug:p.scopeSlug},autoDeploy:false,createdAt:now,updatedAt:now});await store.moveServices([id],body.projectId);
+      }
+    });return {ok:true,count:selected.length};
   });
   const publisherCatalog=async ()=>{
     if(!options.publisher)throw new Error('尚未配置独立发布器。');
@@ -364,6 +385,9 @@ export async function createApp(options:AppOptions) {
     (await jobs.enqueue(id,'github',body.after));return reply.code(202).send({ok:true});
   });
   async function requiredServer(id:string):Promise<Server> {const server=(await store.getServer(id));if(!server)throw new Error('服务器不存在。');return server;}
+  registerConnectionRoutes(app,{store,publisherConfigured:!!options.publisher});
+  registerProviderOAuth(app,{store,publisherConfigured:!!options.publisher});
+  registerDomainRoutes(app,{store,remote});
   const webRoot=resolve(options.webRoot??'dist/web');
   if(existsSync(join(webRoot,'index.html'))){await app.register(staticFiles,{root:webRoot,prefix:'/',index:['index.html']});app.setNotFoundHandler((req,reply)=>req.url.startsWith('/api/')?reply.code(404).send({error:'接口不存在。'}):reply.sendFile('index.html'));}
   app.addHook('onClose',async()=>{jobs.stop();(await agents.close());(await store.close());});

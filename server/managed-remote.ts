@@ -1,8 +1,9 @@
-import type {BootstrapOptions,DeployPlan,Job,KubernetesAction,KubernetesActionResult,RemoteJobStatus,RemoteTransport,Server,ServerStatus,SSHCredential,SignedRelease} from '../shared/types.js';
+import type {BootstrapOptions,DeployPlan,DomainOperation,DockerDomainState,Job,KubernetesAction,KubernetesActionResult,RemoteJobStatus,RemoteTransport,Server,ServerStatus,SSHCredential,SignedRelease} from '../shared/types.js';
 import type {Store} from './store.js';
 import type {AgentController} from './agent-controller.js';
 import {SSHRemote} from './remote.js';
 import {remoteJobStatus} from './remote-status.js';
+import {dockerDomainState} from './domains.js';
 
 /** Select one explicit connection per server; an offline Agent never falls back to another host. */
 export class ManagedRemote implements RemoteTransport {
@@ -40,6 +41,20 @@ export class ManagedRemote implements RemoteTransport {
   async submitSigned(release:SignedRelease,server:Server):Promise<RemoteJobStatus> {
     if(server.connectionMode!=='agent'||release.payload.plan.server.id!==server.id)throw Object.assign(new Error('受保护发布只能发送给对应的 void0 OS。'),{outcomeKnown:true});
     return remoteJobStatus(await this.agents.command(server.id,'submit',{...release.payload,authorization:release.authorization},180_000));
+  }
+  async domain(server:Server,credential:SSHCredential|undefined,operation:DomainOperation):Promise<DockerDomainState> {
+    if(server.connectionMode!=='agent')return this.ssh.domain(server,credential,operation);
+    const info=await this.agents.info(server.id);
+    if(info.deploymentProtection.mode==='strict')throw Object.assign(new Error('此服务器启用了独立发布保护，网页不能直接修改域名；请由服务器管理员配置。'),{outcomeKnown:true});
+    try {
+      const value=await this.agents.command(server.id,'domain',operation,240_000);
+      const error=value as {error?:unknown;outcomeKnown?:unknown};
+      if(error?.error)throw Object.assign(new Error(typeof error.error==='string'?error.error:'域名操作失败。'),{outcomeKnown:error.outcomeKnown===true});
+      return dockerDomainState(value);
+    }catch(error){
+      if(error instanceof Error&&/not supported|unavailable|not available/.test(error.message))throw Object.assign(new Error('服务器上的 void0 OS 尚不支持域名管理，请更新 void0 OS。'),{outcomeKnown:true});
+      throw error;
+    }
   }
   async status(job:Job,server:Server,credential:SSHCredential|undefined):Promise<RemoteJobStatus> {
     if(server.connectionMode!=='agent')return this.ssh.status(job,server,credential);

@@ -3,8 +3,9 @@ import { createHash } from 'node:crypto';
 import { chmod, mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
-import type { DeployPlan, Job, RemoteJobStatus, RemoteTransport, Server, ServerStatus, SSHCredential } from '../shared/types.js';
-import { BOOTSTRAP_SCRIPT, k3sBootstrapScript, KUBERNETES_ACTION_SCRIPT, PROBE_SCRIPT, STATUS_SCRIPT, SUBMIT_SCRIPT } from './remote-scripts.js';
+import type { DeployPlan,DomainOperation,DockerDomainState, Job, RemoteJobStatus, RemoteTransport, Server, ServerStatus, SSHCredential } from '../shared/types.js';
+import { BOOTSTRAP_SCRIPT,DOMAIN_SCRIPT, k3sBootstrapScript, KUBERNETES_ACTION_SCRIPT, PROBE_SCRIPT, STATUS_SCRIPT, SUBMIT_SCRIPT } from './remote-scripts.js';
+import {dockerDomainState} from './domains.js';
 import { remoteJobStatus } from './remote-status.js';
 
 export interface SSHRemoteOptions { dataDir?:string; sshPath?:string; keyscanPath?:string; fetch?:typeof globalThis.fetch }
@@ -147,6 +148,14 @@ export class SSHRemote implements RemoteTransport {
     const status=parseStatus(result.stdout);
     if(result.code!==0&&status.state!=='failed')throw new Error('Deployment submission was interrupted; confirm remote state before retrying');
     return status;
+  }
+
+  async domain(server:Server,credential:SSHCredential|undefined,operation:DomainOperation):Promise<DockerDomainState> {
+    const result=await this.execute(server,credential,(server.username==='root'?'':'sudo -n ')+'python3 -c '+quote(DOMAIN_SCRIPT),Buffer.from(JSON.stringify(operation)),240_000);
+    let value:unknown;try{value=JSON.parse(result.stdout);}catch{throw new Error('域名操作未返回有效结果，请重新检查服务器；不会自动重试。');}
+    const error=value as {error?:unknown;outcomeKnown?:unknown};
+    if(result.code!==0||error.error)throw Object.assign(new Error(typeof error.error==='string'?error.error:'服务器未能完成域名操作。'),{outcomeKnown:error.outcomeKnown===true});
+    return dockerDomainState(value);
   }
 
   async status(job:Job,server:Server,credential:SSHCredential|undefined):Promise<RemoteJobStatus> {

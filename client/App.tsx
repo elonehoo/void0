@@ -63,6 +63,7 @@ import {
 } from "./editors";
 import { SettingsPage } from "./settings";
 import ExistingServiceImport from "./ExistingServiceImport";
+import ServiceDomains from "./ServiceDomains";
 import AuthPage from "./AuthPage";
 import ServerBootstrapModal from "./ServerBootstrapModal";
 import AgentConnection, { AgentSummary, serverCanControl } from "./AgentConnection";
@@ -463,6 +464,7 @@ export default function App() {
           snapshot={snapshot}
           onClose={() => setPopup(null)}
           onSaved={changed}
+          onConnectionsChanged={reload}
         />
       )}
       {popup?.kind === "import" && (
@@ -471,6 +473,7 @@ export default function App() {
           snapshot={snapshot}
           onClose={() => setPopup(null)}
           onSaved={changed}
+          onConnectionsChanged={reload}
         />
       )}
       {popup?.kind === "detail" && selectedService && (
@@ -1414,6 +1417,7 @@ function ServiceDetail({
           <Tabs defaultValue="overview">
             <TabsList variant="line" className="w-full justify-start">
               <TabsTrigger value="overview">概览</TabsTrigger>
+              <TabsTrigger value="domains">域名</TabsTrigger>
               {service.kind === "kubernetes" && <TabsTrigger value="logs">运行日志</TabsTrigger>}
               <TabsTrigger value="history">
                 {service.kind === "kubernetes" ? "操作记录" : "部署记录"} <span>{jobs.length}</span>
@@ -1521,6 +1525,7 @@ function ServiceDetail({
                 <Notice>构建与自动发布继续由 Vercel 的 Git 集成处理。</Notice>
               )}
             </TabsContent>
+            <TabsContent value="domains"><ServiceDomains service={service} onChanged={reload} vercelConnected={snapshot.integrations.vercel.connected}/></TabsContent>
             {service.kind === "kubernetes" && (
               <TabsContent value="logs"><KubernetesLogs service={service} server={server} /></TabsContent>
             )}

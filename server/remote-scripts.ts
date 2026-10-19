@@ -428,6 +428,209 @@ def read_status(folder):
  return {k:v for k,v in s.items() if k not in ('pid','bootId')}
 `;
 
+/** Fixed Docker HTTP routing program. It never accepts shell text, a URL, or a config file from the panel. */
+export const DOMAIN_SCRIPT = COMMON + String.raw`
+import socket,urllib.request,urllib.error,ipaddress,http.client
+NAME='void0-domains'
+IMAGE='caddy:2'
+def checked_domain(value):
+ if not isinstance(value,str) or len(value)>253 or value!=value.lower() or '.' not in value or any(not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?',label) for label in value.split('.')):raise ValueError('Invalid public domain; wildcards, paths and ports are not allowed')
+ try:ipaddress.ip_address(value);raise ValueError('A domain name is required')
+ except ipaddress.AddressValueError:pass
+ except ValueError as e:
+  if str(e)=='A domain name is required':raise
+ if value.rsplit('.',1)[-1] in ('local','localhost','internal','test','invalid'):raise ValueError('A public domain name is required')
+ return value
+def call(args,timeout=60,missing=False):
+ command=([] if os.geteuid()==0 else ['sudo','-n'])+['docker']+args
+ p=subprocess.run(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=ENV,timeout=timeout)
+ if p.returncode:
+  if missing:return None
+  raise RuntimeError('Docker could not complete the domain operation; inspect the managed proxy and port availability')
+ return p.stdout.decode().strip()
+def inspect(name):
+ value=call(['inspect',name],missing=True)
+ if value is None:return None
+ data=json.loads(value)
+ if not isinstance(data,list) or len(data)!=1:raise ValueError('Docker returned an invalid container')
+ return data[0]
+def target(service):
+ if not isinstance(service,dict) or set(service)-{'id','kind','target','containerPort','hostPort'}:raise ValueError('Invalid service target')
+ sid=safe_id(service.get('id'));kind=service.get('kind');selected=service.get('target')
+ if not isinstance(selected,dict):raise ValueError('Invalid Docker service target')
+ if kind in ('source','image'):project='sd-'+sid.replace('-','').lower();name='app'
+ elif kind=='compose':project=selected.get('composeProject');name=selected.get('composeService')
+ elif kind=='container':
+  name=selected.get('containerName')
+  if not isinstance(name,str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,252}',name):raise ValueError('Invalid container target')
+  row=inspect(name)
+  if row and row.get('Name','').lstrip('/')!=name:raise ValueError('Container identity did not match')
+  return sid,row
+ else:raise ValueError('Only Docker HTTP services support domain routing')
+ if any(not isinstance(value,str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,252}',value) for value in (project,name)):raise ValueError('Invalid Compose target')
+ found=(call(['ps','-aq','--filter','label=com.docker.compose.project='+project,'--filter','label=com.docker.compose.service='+name]) or '').splitlines()
+ if not found:return sid,None
+ if len(found)!=1:raise ValueError('The service has multiple containers; domain routing requires one exact target')
+ row=inspect(found[0]);labels=(row or {}).get('Config',{}).get('Labels') or {}
+ if labels.get('com.docker.compose.project')!=project or labels.get('com.docker.compose.service')!=name:raise ValueError('Compose identity did not match')
+ return sid,row
+def published(service,row):
+ if not row or not row.get('State',{}).get('Running'):raise ValueError('The selected Docker service is not running')
+ pairs=set()
+ for inside,bindings in (row.get('NetworkSettings',{}).get('Ports') or {}).items():
+  if not re.fullmatch(r'[0-9]+/tcp',inside):continue
+  if service.get('containerPort') is not None and str(service['containerPort'])+'/tcp'!=inside:continue
+  for binding in bindings or []:
+   if binding.get('HostIp') not in ('0.0.0.0','127.0.0.1',''):continue
+   host=binding.get('HostPort','')
+   if isinstance(host,str) and host.isdigit() and 1<=int(host)<=65535 and (service.get('hostPort') is None or service['hostPort']==int(host)):pairs.add(int(host))
+ if len(pairs)!=1:raise ValueError('Publish one HTTP host port for the selected service before binding a domain')
+ port=next(iter(pairs))
+ if port in (80,443,2019):raise ValueError('The service host port conflicts with the managed proxy; use a separate application port')
+ return port
+def http_ready(port,name):
+ try:
+  request=urllib.request.Request('http://127.0.0.1:'+str(port)+'/',headers={'Host':name,'User-Agent':'void0-domain-check'})
+  opener=urllib.request.build_opener(urllib.request.ProxyHandler({}),NoRedirect())
+  with opener.open(request,timeout=4) as response:return 100<=response.status<600
+ except urllib.error.HTTPError:return True
+ except Exception:return False
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+ def redirect_request(self,*args,**kwargs):return None
+def proxy(root):
+ row=inspect(NAME)
+ if row:
+  labels=row.get('Config',{}).get('Labels') or {}
+  if labels.get('io.void0.domains')!='1' or labels.get('io.void0.domains.root')!=root or row.get('HostConfig',{}).get('NetworkMode')!='host':raise ValueError('An unmanaged or different void0 proxy already uses this container name')
+ return row
+def render(rows):
+ text='{\n admin unix//run/void0-admin/admin.sock\n servers {\n  protocols h1 h2\n }\n}\n'
+ for name,row in sorted(rows.items()):text+=name+' {\n reverse_proxy 127.0.0.1:'+str(row['hostPort'])+'\n header X-Void0-Service '+row['serviceId']+'\n}\n'
+ return text
+def textfile(path,content):
+ if os.path.lexists(path) and (os.path.islink(path) or not os.path.isfile(path)):raise ValueError('Unsafe proxy configuration path')
+ temp=path+'.'+str(uuid.uuid4());fd=os.open(temp,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+ with os.fdopen(fd,'w') as handle:handle.write(content);handle.flush();os.fsync(handle.fileno())
+ os.replace(temp,path)
+def reload_proxy():
+ call(['exec',NAME,'caddy','reload','--config','/etc/void0-domains/Caddyfile','--adapter','caddyfile','--address','unix//run/void0-admin/admin.sock'])
+def active_routes(root):
+ class Local(http.client.HTTPConnection):
+  def connect(self):
+   self.sock=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);self.sock.settimeout(5);self.sock.connect(os.path.join(root,'admin','admin.sock'))
+ connection=Local('localhost',timeout=5)
+ try:
+  connection.request('GET','/config/');response=connection.getresponse();raw=response.read(2*1024*1024+1)
+  if response.status!=200 or len(raw)>2*1024*1024:raise ValueError('The managed proxy did not return its active configuration')
+  config=json.loads(raw)
+ finally:connection.close()
+ result={}
+ def walk(value):
+  if isinstance(value,dict):
+   yield value
+   for child in value.values():yield from walk(child)
+  elif isinstance(value,list):
+   for child in value:yield from walk(child)
+ for server in (config.get('apps',{}).get('http',{}).get('servers') or {}).values():
+  for route in server.get('routes',[]):
+   hosts=[host for matcher in route.get('match',[]) for host in matcher.get('host',[])]
+   if not hosts:continue
+   owners=[];ports=[]
+   for handler in walk(route.get('handle',[])):
+    if handler.get('handler')=='headers':
+     for field,values in handler.get('response',{}).get('set',{}).items():
+      if field.lower()=='x-void0-service':owners+=values
+    if handler.get('handler')=='reverse_proxy':
+     for upstream in handler.get('upstreams',[]):
+      match=re.fullmatch(r'127\.0\.0\.1:([0-9]{1,5})',upstream.get('dial',''))
+      if not match:raise ValueError('Managed proxy has an unapproved upstream')
+      ports.append(int(match[1]))
+   if len(owners)!=1 or len(ports)!=1 or not 1<=ports[0]<=65535:raise ValueError('Managed proxy has an unrecognized route')
+   owner=safe_id(owners[0])
+   for host in hosts:
+    checked_domain(host)
+    if host in result:raise ValueError('Managed proxy has a duplicate domain')
+    result[host]={'serviceId':owner,'hostPort':ports[0]}
+ return result
+def free_ports():
+ for port in (80,443):
+  with socket.socket(socket.AF_INET,socket.SOCK_STREAM) as listener:
+   try:listener.bind(('0.0.0.0',port))
+   except OSError:raise ValueError('Host port 80 or 443 is already in use; the existing proxy will not be replaced')
+uncertain=False
+try:
+ req=json.loads(sys.stdin.buffer.read(16385))
+ if not isinstance(req,dict) or set(req)-{'action','service','name'} or req.get('action') not in ('list','add','remove'):raise ValueError('Invalid domain operation')
+ action=req['action'];service=req.get('service');sid=safe_id((service or {}).get('id'));name=checked_domain(req.get('name')) if action!='list' else None
+ root=private_dir(os.path.join(private_dir(ROOT),'domains'));admin=private_dir(os.path.join(root,'admin'));lock=os.open(os.path.join(root,'routes.lock'),os.O_WRONLY|os.O_CREAT|os.O_NOFOLLOW,0o600);fcntl.flock(lock,fcntl.LOCK_EX)
+ registry=os.path.join(root,'domains.json');config=os.path.join(root,'Caddyfile');rows=load(registry) if os.path.exists(registry) else {}
+ if not isinstance(rows,dict) or len(rows)>500:raise ValueError('Invalid domain registry')
+ for domain,row in rows.items():
+  checked_domain(domain)
+  if not isinstance(row,dict) or set(row)!={'serviceId','hostPort'} or not isinstance(row['hostPort'],int) or isinstance(row['hostPort'],bool) or not 1<=row['hostPort']<=65535:raise ValueError('Invalid stored route')
+  safe_id(row['serviceId'])
+ managed=proxy(root)
+ if managed and managed.get('State',{}).get('Running'):
+  # The running proxy is authoritative, including recovery after a crash between
+  # successful reload and registry persistence. Repair only this owned proxy's files.
+  live_rows=active_routes(root)
+  if live_rows!=rows:rows=live_rows;atomic(registry,rows)
+  if not os.path.exists(config) or Path(config).read_text()!=render(rows):textfile(config,render(rows))
+ if action=='add':
+  if name in rows and rows[name]['serviceId']!=sid:raise ValueError('This domain belongs to another service on this server')
+  _,selected=target(service);port=published(service,selected)
+  if not http_ready(port,name):raise ValueError('The published port did not answer HTTP; database and raw TCP services cannot use this domain route')
+  rows[name]={'serviceId':sid,'hostPort':port}
+  if sum(1 for route in rows.values() if route['serviceId']==sid)>25:raise ValueError('A service can have at most 25 managed domains')
+ elif action=='remove':
+  if name not in rows or rows[name]['serviceId']!=sid:raise ValueError('This domain is not bound to the selected service')
+  del rows[name]
+ if action!='list':
+  if not managed:free_ports()
+  candidate=os.path.join(root,'Caddyfile.candidate');textfile(candidate,render(rows))
+  # Docker is the only installer. No remote shell command or arbitrary upstream is accepted.
+  call(['run','--rm','--network','none','-v',root+':/etc/void0-domains:ro',IMAGE,'caddy','validate','--config','/etc/void0-domains/Caddyfile.candidate','--adapter','caddyfile'],180)
+  old=Path(config).read_text() if os.path.exists(config) else None;created=False
+  try:
+   uncertain=True
+   textfile(config,render(rows))
+   if managed:
+    if not managed.get('State',{}).get('Running'):call(['start',NAME])
+    reload_proxy()
+   else:
+    created=True;call(['run','-d','--name',NAME,'--network','host','--restart','unless-stopped','--label','io.void0.domains=1','--label','io.void0.domains.root='+root,'-v',root+':/etc/void0-domains:ro','-v',admin+':/run/void0-admin','-v','void0-domain-certificates:/data','-v','void0-domain-runtime:/config',IMAGE,'caddy','run','--config','/etc/void0-domains/Caddyfile','--adapter','caddyfile'],180)
+    ready=False
+    for attempt in range(20):
+     current=proxy(root)
+     if current and current.get('State',{}).get('Running') and call(['exec',NAME,'caddy','reload','--config','/etc/void0-domains/Caddyfile','--adapter','caddyfile','--address','unix//run/void0-admin/admin.sock'],missing=True) is not None:ready=True;break
+     time.sleep(.15)
+    if not ready:raise RuntimeError('Managed Caddy did not start')
+   atomic(registry,rows);uncertain=False
+  except Exception:
+   if old is not None:textfile(config,old)
+   elif os.path.exists(config):os.unlink(config)
+   if created:
+    call(['rm','-f',NAME])
+   elif managed and old is not None:
+    try:reload_proxy()
+    except Exception:raise RuntimeError('Domain update failed and previous proxy reload could not be confirmed; inspect the server before retrying')
+   uncertain=False;raise
+  finally:
+   if os.path.exists(candidate):os.unlink(candidate)
+ managed=proxy(root)
+ if action!='list':uncertain=True
+ if managed and managed.get('State',{}).get('Running'):rows=active_routes(root)
+ selected=[{'name':domain,'hostPort':row['hostPort']} for domain,row in rows.items() if row['serviceId']==sid]
+ try:
+  _,current=target(service);current_port=published(service,current)
+  live=all(row['hostPort']==current_port and http_ready(row['hostPort'],row['name']) for row in selected)
+ except Exception:live=not selected
+ print(json.dumps({'domains':selected,'proxyReady':bool(managed and managed.get('State',{}).get('Running')),'upstreamReady':live}))
+ uncertain=False
+except Exception as error:
+ print(json.dumps({'error':str(error),'outcomeKnown':not uncertain}));sys.exit(1)
+`;
+
 export const STATUS_SCRIPT = COMMON + String.raw`
 try:
  req=json.loads(sys.stdin.buffer.read(4096));jid=safe_id(req['jobId']);folder=os.path.join(ROOT,'jobs',jid)

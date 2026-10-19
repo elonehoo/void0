@@ -23,7 +23,7 @@ function fixture(): {
     const store = new Store(join(directory, 'data'));
     return { directory, store, cleanup: async () => { await store.close(); rmSync(directory, { recursive: true, force: true }); } };
 }
-test('groups contain services across servers and providers; moving is explicit and deletion keeps resources', async () => {
+test('groups contain services across servers and providers; moving is explicit and only empty projects can be deleted', async () => {
     const f = fixture();
     try {
         const first = await f.store.saveServer(server());
@@ -38,7 +38,11 @@ test('groups contain services across servers and providers; moving is explicit a
         await f.store.moveServices([b.id], other.id);
         assert.deepEqual((await f.store.getProject(other.id))?.serviceIds, [b.id]);
         assert.deepEqual((await f.store.getProject(group.id))?.serviceIds, [a.id, cloud.id]);
+        await assert.rejects(() => f.store.removeProject(group.id), /仍包含服务/);
+        assert.deepEqual((await f.store.getProject(group.id))?.serviceIds, [a.id, cloud.id]);
+        await f.store.moveServices([a.id, cloud.id], other.id);
         await f.store.removeProject(group.id);
+        assert.equal(await f.store.getProject(group.id), undefined);
         assert.equal((await f.store.allServices()).length, 3);
         await assert.rejects(async () => await f.store.removeServer(first.id), /关联/);
         await f.store.removeService(a.id);

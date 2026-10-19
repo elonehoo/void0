@@ -52,8 +52,10 @@ async function fixture(options:{publicUrl?:string;remote?:FakeRemote;publisher?:
     const response=await request('POST',`/api/servers/${server.id}/fingerprint`);assert.equal(response.statusCode,200,response.body);
     const saved=await request('POST',`/api/servers/${server.id}/credentials`,{...response.json<{fingerprint:string;hostKey:string}>(),password:'fixture-server-password'});assert.equal(saved.statusCode,200,saved.body);
   };
-  const addImage=async(server:Server,projectId?:string):Promise<Service>=>{const response=await request('POST','/api/services',{name:'web',kind:'image',serverId:server.id,image:'nginx:alpine',...(projectId?{projectId}:{})});assert.equal(response.statusCode,200,response.body);return response.json();};
-  return {...created,directory,remote,request,setup,addServer,connect,addImage,auth:()=>({cookie,csrf}),cleanup:async()=>{await created.app.close();rmSync(directory,{recursive:true,force:true});}};
+  const addProject=async(name='Fixture project'):Promise<Project>=>{const response=await request('POST','/api/projects',{name});assert.equal(response.statusCode,200,response.body);return response.json();};
+  let defaultProject:Project|undefined;
+  const addImage=async(server:Server,projectId?:string):Promise<Service>=>{if(!projectId)projectId=(defaultProject??=await addProject()).id;const response=await request('POST','/api/services',{name:'web',kind:'image',serverId:server.id,image:'nginx:alpine',projectId});assert.equal(response.statusCode,200,response.body);return response.json();};
+  return {...created,directory,remote,request,setup,addServer,connect,addProject,addImage,auth:()=>({cookie,csrf}),cleanup:async()=>{await created.app.close();rmSync(directory,{recursive:true,force:true});}};
 }
 async function eventually(predicate:()=>boolean|Promise<boolean>):Promise<void> { for(let index=0;index<100;index++){if(await predicate())return;await new Promise(resolve=>setTimeout(resolve,5));}throw new Error('Expected state was not reached'); }
 
@@ -110,7 +112,7 @@ test('public management URL requires HTTPS and issues secure session cookies',as
   }finally{await f.cleanup();}
 });
 
-test('project API groups different servers together, moves services, and deletes only grouping',async()=>{
+test('project API groups different servers together, moves services, and deletes only empty projects',async()=>{
   const f=await fixture();try {
     await f.setup();const first=await f.addServer('First');const second=await f.addServer('Second','127.0.0.2');
     const a=await f.addImage(first);const b=await f.addImage(second);
@@ -118,6 +120,12 @@ test('project API groups different servers together, moves services, and deletes
     assert.deepEqual(group.json().serviceIds,[a.id,b.id]);
     const other=await f.request('POST','/api/projects',{name:'Other'});const moved=await f.request('PUT',`/api/projects/${other.json().id}`,{name:'Other',serviceIds:[b.id]});assert.equal(moved.statusCode,200,moved.body);
     assert.deepEqual((await f.store.getProject(group.json().id))?.serviceIds,[a.id]);assert.deepEqual((await f.store.getProject(other.json().id))?.serviceIds,[b.id]);
+    const before=await f.store.snapshot();
+    const blocked=await f.request('DELETE',`/api/projects/${group.json().id}`);assert.equal(blocked.statusCode,400);assert.match(blocked.json().error,/仍包含服务/);
+    assert.deepEqual(await f.store.snapshot(),before);
+    const detach=await f.request('PUT',`/api/projects/${group.json().id}`,{name:'Business',serviceIds:[]});assert.equal(detach.statusCode,400);assert.match(detach.json().error,/目标项目/);
+    assert.deepEqual(await f.store.snapshot(),before);
+    const movedAll=await f.request('PUT',`/api/projects/${other.json().id}`,{name:'Other',serviceIds:[a.id,b.id]});assert.equal(movedAll.statusCode,200,movedAll.body);
     assert.equal((await f.request('DELETE',`/api/projects/${group.json().id}`)).statusCode,200);
     const snapshot=(await f.request('GET','/api/workspace')).json<WorkspaceSnapshot>();assert.equal(snapshot.services.length,2);assert.equal(snapshot.servers.length,2);
     assert.equal((await f.request('DELETE',`/api/servers/${first.id}`)).statusCode,400);
@@ -125,11 +133,85 @@ test('project API groups different servers together, moves services, and deletes
   }finally{await f.cleanup();}
 });
 
+test('new services require an existing project and edits retain ownership without requiring provider connections',async()=>{
+  const f=await fixture();try{
+    await f.setup();const server=await f.addServer();
+    const payload={name:'Owned image',kind:'image',serverId:server.id,image:'nginx:alpine',environment:{TOKEN:'rejected-project-environment-fixture'}};
+    const before=await f.store.snapshot();
+    const missing=await f.request('POST','/api/services',payload);assert.equal(missing.statusCode,400);assert.match(missing.json().error,/创建或选择项目/);
+    const unknown=await f.request('POST','/api/services',{...payload,projectId:'missing-project'});assert.equal(unknown.statusCode,400);assert.match(unknown.json().error,/项目不存在/);
+    assert.deepEqual(await f.store.snapshot(),before);assert.equal(await f.store.vault.hasPrefix('environment:'),false);
+    const owner=await f.addProject('Owner');const other=await f.addProject('Other');
+    const service=await f.addImage(server,owner.id);
+    assert.equal(await f.store.vault.has('github'),false);assert.equal(await f.store.vault.has('vercel'),false);
+    const edited=await f.request('PUT',`/api/services/${service.id}`,{name:'Renamed image'});assert.equal(edited.statusCode,200,edited.body);
+    assert.deepEqual((await f.store.getProject(owner.id))?.serviceIds,[service.id]);
+    const changed=await f.store.snapshot();
+    const implicitMove=await f.request('PUT',`/api/services/${service.id}`,{name:'Implicit move',projectId:other.id});assert.equal(implicitMove.statusCode,400);assert.match(implicitMove.json().error,/目标项目的设置/);
+    assert.deepEqual(await f.store.snapshot(),changed);
+    assert.equal(f.remote.submissions.length,0);
+  }finally{await f.cleanup();}
+});
+
+test('legacy unassigned services remain editable and can be explicitly adopted by a project',async()=>{
+  const f=await fixture();try{
+    await f.setup();const server=await f.addServer();const now=new Date().toISOString();
+    const legacy=await f.store.saveService({id:'legacy-unassigned-service',name:'Legacy image',kind:'image',serverId:server.id,image:'nginx:alpine',target:{},autoDeploy:false,createdAt:now,updatedAt:now});
+    const edited=await f.request('PUT',`/api/services/${legacy.id}`,{name:'Legacy renamed'});assert.equal(edited.statusCode,200,edited.body);
+    assert.equal((await f.store.allProjects()).length,0);
+    const project=await f.addProject('Adopted services');
+    const adopted=await f.request('PUT',`/api/projects/${project.id}`,{name:project.name,serviceIds:[legacy.id]});assert.equal(adopted.statusCode,200,adopted.body);
+    assert.deepEqual((await f.store.getProject(project.id))?.serviceIds,[legacy.id]);
+    const renamedProject=await f.request('PUT',`/api/projects/${project.id}`,{name:'Project renamed'});assert.equal(renamedProject.statusCode,200,renamedProject.body);
+    assert.deepEqual(renamedProject.json().serviceIds,[legacy.id]);
+    assert.equal((await f.store.getService(legacy.id))?.createdAt,now);assert.equal(f.remote.submissions.length,0);
+  }finally{await f.cleanup();}
+});
+
+test('Vercel imports recheck current access and refuse implicit cross-project moves atomically',async()=>{
+  const f=await fixture();const originalFetch=globalThis.fetch;
+  let catalog=[{id:'prj_existing',name:'Existing web',accountId:'team_example'}],reads=0,onRead:(()=>Promise<void>)|undefined;
+  globalThis.fetch=(async(input:RequestInfo|URL,init?:RequestInit)=>{
+    const url=String(input);assert.equal(new Headers(init?.headers).get('authorization'),'Bearer fixture-vercel-access');
+    if(url==='https://api.vercel.com/v2/teams?limit=100')return new Response(JSON.stringify({teams:[]}),{headers:{'content-type':'application/json'}});
+    assert.match(url,/^https:\/\/api\.vercel\.com\/v9\/projects\?/);reads++;await onRead?.();
+    return new Response(JSON.stringify({projects:catalog}),{headers:{'content-type':'application/json'}});
+  }) as typeof fetch;
+  try{
+    await f.setup();const project=await f.addProject('Websites');const other=await f.addProject('Other websites');
+    const request=()=>f.request('POST','/api/vercel/import',{projectId:project.id,projectIds:['prj_existing']});
+    assert.equal((await request()).statusCode,400);assert.equal(reads,0);
+    await f.store.vault.set('vercel',{token:'fixture-vercel-access'});
+    const listed=await f.request('GET','/api/vercel/projects');assert.equal(listed.statusCode,200,listed.body);assert.equal(reads,1);
+    catalog=[];const revoked=await request();assert.equal(revoked.statusCode,400);assert.match(revoked.json().error,/当前 Vercel 连接访问/);assert.equal(reads,2);
+    assert.deepEqual((await f.store.getProject(project.id))?.serviceIds,[]);assert.equal((await f.store.allServices()).length,0);
+    catalog=[{id:'prj_existing',name:'Existing web',accountId:'team_example'}];
+    const imported=await request();assert.equal(imported.statusCode,200,imported.body);assert.equal(reads,3);
+    const service=(await f.store.allServices())[0];assert.equal(service.kind,'vercel');assert.equal(service.target.vercelScopeId,'team_example');assert.equal(service.autoDeploy,false);
+    assert.deepEqual((await f.store.getProject(project.id))?.serviceIds,[service.id]);
+    assert.equal((await request()).statusCode,200);assert.equal((await f.store.allServices()).length,1);
+    await f.store.vault.delete('vercel');const disconnected=await request();assert.equal(disconnected.statusCode,400);assert.match(disconnected.json().error,/连接 Vercel/);
+    await f.store.vault.set('vercel',{token:'fixture-vercel-access'});
+    catalog.push({id:'prj_new',name:'New web',accountId:'team_example'});
+    const before=await f.store.snapshot();
+    const crossProject=await f.request('POST','/api/vercel/import',{projectId:other.id,projectIds:['prj_new','prj_existing']});assert.equal(crossProject.statusCode,400);assert.match(crossProject.json().error,/已属于其他项目/);
+    assert.deepEqual(await f.store.snapshot(),before,'a rejected batch must remove earlier insertions and preserve every project');
+    const duplicate=await f.request('POST','/api/vercel/import',{projectId:other.id,projectIds:['prj_new','prj_new']});assert.equal(duplicate.statusCode,400);assert.deepEqual(await f.store.snapshot(),before);
+    onRead=()=>f.store.vault.delete('vercel');
+    const disconnectedInFlight=await f.request('POST','/api/vercel/import',{projectId:other.id,projectIds:['prj_new']});assert.equal(disconnectedInFlight.statusCode,400);assert.match(disconnectedInFlight.json().error,/连接已变更/);
+    assert.deepEqual(await f.store.snapshot(),before,'disconnecting during the provider request must prevent importing with stale access');onRead=undefined;
+    await f.store.vault.set('vercel',{token:'fixture-vercel-access'});
+    const explicitMove=await f.request('PUT',`/api/projects/${other.id}`,{name:other.name,serviceIds:[service.id]});assert.equal(explicitMove.statusCode,200,explicitMove.body);
+    assert.deepEqual((await f.store.getProject(project.id))?.serviceIds,[]);assert.deepEqual((await f.store.getProject(other.id))?.serviceIds,[service.id]);
+    assert.equal(f.remote.submissions.length,0);
+  }finally{globalThis.fetch=originalFetch;await f.cleanup();}
+});
+
 test('source API stores canonical repository URL and never returns environment or integration tokens',async()=>{
   const f=await fixture();try {
     await f.setup();const server=await f.addServer();
     (await f.store.vault.set('github',{token:'fixture-github-token-secret'}));
-    const response=await f.request('POST','/api/services',{name:'Source',kind:'source',serverId:server.id,repository:'example/repository.git',branch:'main',dockerfile:'Dockerfile',context:'.',environment:{DATABASE_PASSWORD:'fixture-database-secret'},autoDeploy:false});
+    const response=await f.request('POST','/api/services',{projectId:(await f.addProject()).id,name:'Source',kind:'source',serverId:server.id,repository:'example/repository.git',branch:'main',dockerfile:'Dockerfile',context:'.',environment:{DATABASE_PASSWORD:'fixture-database-secret'},autoDeploy:false});
     assert.equal(response.statusCode,200,response.body);const resource=response.json<Service>();assert.equal(resource.repository,'https://github.com/example/repository');assert.equal(resource.environment,undefined);
     assert.deepEqual((await f.store.getServiceEnvironment(resource.id)),{DATABASE_PASSWORD:'fixture-database-secret'});
     const workspace=await f.request('GET','/api/workspace');assert.equal(workspace.statusCode,200,workspace.body);
@@ -203,7 +285,7 @@ test('signed GitHub notification for an obsolete commit never submits old code',
   try {
     await f.setup();const server=await f.addServer();await f.connect(server);
     (await f.store.vault.set('github',{token:'fixture-github-secret'}));
-    const source=await f.request('POST','/api/services',{name:'Source',kind:'source',serverId:server.id,repository:'example/repository',branch:'main',autoDeploy:true});assert.equal(source.statusCode,200,source.body);const resource=source.json<Service>();
+    const source=await f.request('POST','/api/services',{projectId:(await f.addProject()).id,name:'Source',kind:'source',serverId:server.id,repository:'example/repository',branch:'main',autoDeploy:true});assert.equal(source.statusCode,200,source.body);const resource=source.json<Service>();
     const secret='fixture-webhook-secret';(await f.store.vault.set(`webhook:${resource.id}`,{secret}));
     const stale='a'.repeat(40),latest='b'.repeat(40);
     const body=JSON.stringify({ref:'refs/heads/main',after:stale,repository:{full_name:'example/repository'}});
@@ -317,7 +399,7 @@ test('independent publisher mode keeps GitHub credentials out of the controller'
     assert.equal(await f.store.vault.has('github'),false);
     const server=await f.addServer();await f.store.saveServer({...server,connectionMode:'agent'});
     const pairing=await f.agents.createPairing(server.id);await f.agents.register({...pairing,hostname:'authorized-os',version:'test'});
-    const service=await f.request('POST','/api/services',{name:'Published source',kind:'source',serverId:server.id,repository:'https://github.com/fixture/source',autoDeploy:true});
+    const service=await f.request('POST','/api/services',{projectId:(await f.addProject()).id,name:'Published source',kind:'source',serverId:server.id,repository:'https://github.com/fixture/source',autoDeploy:true});
     assert.equal(service.statusCode,200,service.body);
     assert.equal(service.json().autoDeploy,true);
     const workspace=await f.request('GET','/api/workspace');
@@ -349,7 +431,7 @@ test('publisher image automatic deployment accepts an online OS without SSH cred
     await f.agents.register({...pairing,hostname:'publisher-os',version:'test'});
     assert.equal(await f.store.vault.has(`ssh:${server.id}`),false);
     assert.equal(await f.store.vault.has('github'),false);
-    const created=await f.request('POST','/api/services',{name:'Signed image',kind:'image',serverId:server.id,image:'registry.example.com/app@sha256:'+'a'.repeat(64),repository:'https://github.com/fixture/app',autoDeploy:true});
+    const created=await f.request('POST','/api/services',{projectId:(await f.addProject()).id,name:'Signed image',kind:'image',serverId:server.id,image:'registry.example.com/app@sha256:'+'a'.repeat(64),repository:'https://github.com/fixture/app',autoDeploy:true});
     assert.equal(created.statusCode,200,created.body);
     assert.equal(created.json().autoDeploy,true);
     const edited=await f.request('PUT',`/api/services/${created.json().id}`,{name:'Signed image renamed',autoDeploy:true});
@@ -370,10 +452,10 @@ test('compatibility source automatic deployment accepts an online OS without req
     const pairing=await f.agents.createPairing(server.id);
     await f.agents.register({...pairing,hostname:'compatibility-os',version:'test'});
     assert.equal(await f.store.vault.has(`ssh:${server.id}`),false);
-    const source=await f.request('POST','/api/services',{name:'Compatibility source',kind:'source',serverId:server.id,repository:'https://github.com/fixture/app',autoDeploy:true});
+    const source=await f.request('POST','/api/services',{projectId:(await f.addProject()).id,name:'Compatibility source',kind:'source',serverId:server.id,repository:'https://github.com/fixture/app',autoDeploy:true});
     assert.equal(source.statusCode,200,source.body);
     assert.equal(source.json().autoDeploy,true);
-    const image=await f.request('POST','/api/services',{name:'Legacy image',kind:'image',serverId:server.id,image:'nginx:alpine',repository:'https://github.com/fixture/app',autoDeploy:true});
+    const image=await f.request('POST','/api/services',{projectId:(await f.addProject()).id,name:'Legacy image',kind:'image',serverId:server.id,image:'nginx:alpine',repository:'https://github.com/fixture/app',autoDeploy:true});
     assert.equal(image.statusCode,400,'compatibility mode still requires a source or existing Compose service for automatic deployment');
   }finally{await f.cleanup();}
 });
@@ -513,10 +595,10 @@ test('publisher mode refuses existing and newly submitted application variables 
     const blocked=await reopened.app.inject({method:'PUT',url:`/api/services/${service.id}`,headers,payload:{name:service.name,environment:{TOKEN:'new-environment-must-not-be-stored'}}});
     assert.equal(blocked.statusCode,400);assert.match(blocked.json().error,/业务服务器本地文件/);
     assert.deepEqual(await reopened.store.getServiceEnvironment(service.id),{});
-    const newService=await reopened.app.inject({method:'POST',url:'/api/services',headers,payload:{name:'New environment',kind:'image',serverId:server.id,environment:{TOKEN:'new-environment-must-not-be-stored'}}});
-    assert.equal(newService.statusCode,400);
     const project=await reopened.app.inject({method:'POST',url:'/api/projects',headers,payload:{name:'Variable import guard'}});
     assert.equal(project.statusCode,200,project.body);
+    const newService=await reopened.app.inject({method:'POST',url:'/api/services',headers,payload:{projectId:project.json().id,name:'New environment',kind:'image',serverId:server.id,environment:{TOKEN:'new-environment-must-not-be-stored'}}});
+    assert.equal(newService.statusCode,400);assert.match(newService.json().error,/业务服务器本地文件/);
     catalog=[{service,server}];
     // Simulate a concurrent legacy writer. Import must recheck rather than rely only on startup.
     await reopened.store.setServiceEnvironment(service.id,{TOKEN:'concurrent-legacy-fixture'});

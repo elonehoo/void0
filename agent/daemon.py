@@ -27,8 +27,8 @@ import urllib.request
 VERSION = "0.3.0"
 MAX_RESPONSE = 80 * 1024 * 1024
 MAX_OUTPUT = 4 * 1024 * 1024
-OPERATIONS = frozenset(("probe", "bootstrap", "submit", "status", "kubernetes-action"))
-MUTATIONS = frozenset(("bootstrap", "submit", "kubernetes-action"))
+OPERATIONS = frozenset(("probe", "bootstrap", "submit", "status", "kubernetes-action", "domain"))
+MUTATIONS = frozenset(("bootstrap", "submit", "kubernetes-action", "domain"))
 
 
 class AgentError(Exception):
@@ -559,6 +559,15 @@ class Programs:
             code = child.wait(timeout=5)
             feeder.join(timeout=1)
             if code != 0:
+                if operation == "domain":
+                    try:
+                        failure = json.loads(output.decode("utf-8"))
+                        if (isinstance(failure, dict) and isinstance(failure.get("error"), str) and
+                                set(failure) <= {"error", "outcomeKnown"}):
+                            return {"ok": False, "error": redact_result(failure["error"], secrets),
+                                    "outcomeKnown": failure.get("outcomeKnown") is True}
+                    except (ValueError, UnicodeError):
+                        pass
                 raise AgentError("The installed operation failed (exit %d)." % code)
             if operation == "bootstrap" or spec.get("format") == "text":
                 value = {"log": (output + errors).decode("utf-8", errors="replace")}

@@ -2,7 +2,7 @@ import {readFileSync} from 'node:fs';
 import {resolve} from 'node:path';
 import {gzipSync} from 'node:zlib';
 import {createHash} from 'node:crypto';
-import {BOOTSTRAP_SCRIPT,K3S_BOOTSTRAP_SCRIPT,KUBERNETES_ACTION_SCRIPT,PROBE_SCRIPT,STATUS_SCRIPT,SUBMIT_SCRIPT} from './remote-scripts.js';
+import {BOOTSTRAP_SCRIPT,DOMAIN_SCRIPT,K3S_BOOTSTRAP_SCRIPT,KUBERNETES_ACTION_SCRIPT,PROBE_SCRIPT,STATUS_SCRIPT,SUBMIT_SCRIPT} from './remote-scripts.js';
 
 let cached:Buffer|undefined;
 const asset=(name:string)=>readFileSync(resolve('agent',name));
@@ -11,7 +11,7 @@ export function agentBundle():Buffer {
   if(cached)return cached;
   const python=(script:string,timeoutSeconds:number)=>({language:'python',script,timeoutSeconds,outputLimit:256*1024});
   const shell=(script:string)=>({language:'shell',script,timeoutSeconds:900,outputLimit:256*1024});
-  const programs={probe:python(PROBE_SCRIPT,90),bootstrap:{docker:shell(BOOTSTRAP_SCRIPT),k3s:shell(K3S_BOOTSTRAP_SCRIPT)},submit:python(SUBMIT_SCRIPT,180),status:python(STATUS_SCRIPT,60),'kubernetes-action':python(KUBERNETES_ACTION_SCRIPT,180)};
+  const programs={probe:python(PROBE_SCRIPT,90),bootstrap:{docker:shell(BOOTSTRAP_SCRIPT),k3s:shell(K3S_BOOTSTRAP_SCRIPT)},submit:python(SUBMIT_SCRIPT,180),status:python(STATUS_SCRIPT,60),'kubernetes-action':python(KUBERNETES_ACTION_SCRIPT,180),domain:python(DOMAIN_SCRIPT,240)};
   const files=[['daemon.py',asset('daemon.py')],['programs.json',Buffer.from(JSON.stringify(programs))],['serverdesk-agent.service',asset('serverdesk-agent.service')],['install.sh',agentInstaller()]] as const;
   const blocks:Buffer[]=[];
   for(const [name,data] of files){

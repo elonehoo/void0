@@ -7,7 +7,7 @@ import {Input} from './components/ui/input';
 import {Checkbox} from './components/ui/checkbox';
 import {Switch} from './components/ui/switch';
 
-export interface ServiceEditorProps {service?:Service;project:Project;snapshot:WorkspaceSnapshot;onClose:()=>void;onSaved:()=>Promise<void>}
+export interface ServiceEditorProps {service?:Service;project:Project;snapshot:WorkspaceSnapshot;onClose:()=>void;onSaved:()=>Promise<void>;onConnectionsChanged?:()=>Promise<unknown>}
 export default function PublisherServiceEditor({service,project,snapshot,onClose,onSaved}:ServiceEditorProps) {
   const [catalog,setCatalog]=useState<Array<{service:Service;server:Server}>>([]),[selected,setSelected]=useState<string[]>([]);
   const [name,setName]=useState(service?.name??''),[automatic,setAutomatic]=useState(service?.autoDeploy??false);
